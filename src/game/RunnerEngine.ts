@@ -2928,6 +2928,12 @@ export class RunnerEngine {
     }
     gameAudio.setZoneAmbience(z0.ambienceType);
     gameAudio.setPlaying(true);
+    gameAudio.playRunStart(
+      () =>
+        this.phase === 'playing' &&
+        ZONES[this.zoneIndex]?.id === 'mahalle_caddesi' &&
+        this.stumbleTimer <= 0,
+    );
 
     this.triggerDialogue('start');
     this.callbacks.onZoneChange(z0);
@@ -2939,6 +2945,7 @@ export class RunnerEngine {
     this.phase = 'paused';
     this.resumeCountdownTimer = 0;
     this.lastCountdownInt = 0;
+    gameAudio.stopGameVoice();
     gameAudio.setPlaying(false);
     this.emitHud();
     this.flushPendingBackgroundWork();
@@ -3029,6 +3036,7 @@ export class RunnerEngine {
       seg.group.position.z = -i * SEGMENT_LENGTH;
       this.updateSegmentBiome(seg, -seg.group.position.z, ZONES[0].buildingTint);
     }
+    gameAudio.stopGameVoice();
     gameAudio.setPlaying(false);
     this.emitHud();
     this.flushPendingBackgroundWork();
@@ -3098,6 +3106,7 @@ export class RunnerEngine {
 
     gameAudio.setPlaying(true);
     gameAudio.playPowerup();
+    gameAudio.playReviveVoice();
     this.triggerDialogue('revive');
     this.emitHud();
   }
@@ -4928,6 +4937,7 @@ export class RunnerEngine {
         }
         gameAudio.setZoneAmbience(newZone.ambienceType);
         gameAudio.playZoneTransition();
+        gameAudio.playZoneAnnouncement(newZone.id);
         this.callbacks.onZoneChange(newZone);
         this.applyZoneVisuals(newZone, false);
 
@@ -5113,6 +5123,10 @@ export class RunnerEngine {
         (this.stumbleTimer > 0 || this.introChaseTimer > 0);
       const chaserX = this.chaserGlb ? this.chaserGlb.root.position.x : this.playerX;
       const chaserZ = this.chaserGlb ? this.chaserGlb.root.position.z : 1.42;
+      const chaserInChaseSpot =
+        stepChaserActive &&
+        chaserZ <= 2.5 &&
+        (this.stumbleTimer >= 1.1 || (this.stumbleTimer <= 0 && this.introChaseTimer >= 1.2));
       let chaserGround = stepChaserActive
         ? this.getWorldGroundY(Math.max(0, this.distance - chaserZ))
         : stepFloorY;
@@ -5176,17 +5190,18 @@ export class RunnerEngine {
         }
 
         if (
-          stepChaserActive &&
+          chaserInChaseSpot &&
           obs.kind !== 'bus_ramp' &&
           obs.kind !== 'terrain_ramp' &&
           obs.kind !== 'spring_pad' &&
-          obs.minY < 0.85
+          obs.minY < 0.85 &&
+          obs.height <= 1.65
         ) {
           const obsX = obs.visualX ?? LANE_X[obs.lane];
           if (
-            Math.abs(obsX - chaserX) < 1.02 &&
-            obs.z >= chaserZ - 2.35 - obs.halfDepth &&
-            obs.z <= chaserZ + 0.12 &&
+            Math.abs(obsX - chaserX) < 0.72 &&
+            obs.z >= chaserZ - 2.15 - obs.halfDepth &&
+            obs.z <= chaserZ - 0.1 &&
             chaserGround <= obs.baseY + 0.35
           ) {
             chaserObstacleAhead = true;
@@ -5322,21 +5337,27 @@ export class RunnerEngine {
         this.chaserJumpCooldown = Math.max(0, this.chaserJumpCooldown - subDt);
       }
       if (stepChaserActive) {
-        for (let v = 0; v < movingVehicles.length; v++) {
-          const obs = movingVehicles[v];
-          const obsX = obs.visualX ?? LANE_X[obs.lane];
-          if (
-            Math.abs(obsX - chaserX) < 1.02 &&
-            obs.z >= chaserZ - 2.35 - obs.halfDepth &&
-            obs.z <= chaserZ + 0.12 &&
-            chaserGround <= obs.baseY + 0.35
-          ) {
-            chaserObstacleAhead = true;
-            break;
+        if (chaserInChaseSpot) {
+          for (let v = 0; v < movingVehicles.length; v++) {
+            const obs = movingVehicles[v];
+            if (obs.height > 1.65) continue;
+            const obsX = obs.visualX ?? LANE_X[obs.lane];
+            if (
+              Math.abs(obsX - chaserX) < 0.72 &&
+              obs.z >= chaserZ - 2.15 - obs.halfDepth &&
+              obs.z <= chaserZ - 0.1 &&
+              chaserGround <= obs.baseY + 0.35
+            ) {
+              chaserObstacleAhead = true;
+              break;
+            }
           }
         }
         const playerAirborneJump =
-          !this.isGrounded && this.playerY > stepFloorY + 0.42 && this.velY > 2.5;
+          chaserInChaseSpot &&
+          !this.isGrounded &&
+          this.playerY > stepFloorY + 0.45 &&
+          this.velY > 3.0;
         if (
           this.chaserGrounded &&
           this.chaserJumpCooldown <= 0 &&
@@ -5344,7 +5365,7 @@ export class RunnerEngine {
         ) {
           this.chaserVelY = 14.8;
           this.chaserGrounded = false;
-          this.chaserJumpCooldown = 0.24;
+          this.chaserJumpCooldown = 0.55;
           this.chaserJustJumped = true;
         }
         if (!this.chaserGrounded || this.chaserY > this.chaserGroundY + 0.04) {
@@ -5394,6 +5415,7 @@ export class RunnerEngine {
             this.springArcPullTimer = 1.25;
             this.springSafeTimer = 1.5;
             gameAudio.playSpringLaunch();
+            gameAudio.playSpringVoice();
             this.bumpCombo(40);
             this.spawnBurst(this.playerX, this.playerY + 0.4, 0, 0x38bdf8, 12, 4.5);
           }
@@ -5485,6 +5507,7 @@ export class RunnerEngine {
                 this.combo = 1;
                 this.comboTimer = 0;
                 gameAudio.playStumble();
+                gameAudio.playStumbleVoice();
                 this.spawnBurst(this.playerX, this.playerY + 0.6, 0, 0xf97316, 10, 4.0);
                 const targetX = THREE.MathUtils.clamp(this.playerX + 0.56, -3.05, 3.05);
                 this.activateChaserOnStumble(targetX);
@@ -5521,6 +5544,9 @@ export class RunnerEngine {
           obs.nearMissAwarded = true;
           this.metrics.nearMisses += 1;
           this.bumpCombo(25);
+          if (Math.random() < 0.45) {
+            gameAudio.playNearMissVoice();
+          }
           if (Math.random() < 0.25) {
             this.triggerDialogue('near_miss');
           }
@@ -6427,6 +6453,7 @@ export class RunnerEngine {
     this.hasShield = false;
     this.invulnTimer = 1.4 + (this.upgrades.shield - 1) * 0.35;
     gameAudio.playShieldBreak();
+    gameAudio.playShieldBreakVoice();
     this.triggerDialogue('shield_break');
     this.releaseObstacle(obs);
     this.obstacles.splice(index, 1);
@@ -6435,6 +6462,7 @@ export class RunnerEngine {
   private activatePowerup(type: PowerupType): void {
     this.metrics.powerups += 1;
     gameAudio.playPowerup();
+    gameAudio.playPowerupVoice(type);
     if (type === 'magnet') {
       this.metrics.magnets += 1;
       this.magnetTimer = 8.0 + (this.upgrades.magnet - 1) * 1.5;
@@ -6483,6 +6511,7 @@ export class RunnerEngine {
     this.combo = 1;
     this.comboTimer = 0;
     gameAudio.playStumble();
+    gameAudio.playStumbleVoice();
     this.spawnBurst(obsX + resolvedSide * 0.85, this.playerY + 0.7, 0, 0xf97316, 10, 4.0);
     const targetChaserX = THREE.MathUtils.clamp(this.playerX + 0.56, -3.05, 3.05);
     this.activateChaserOnStumble(targetChaserX);
@@ -6546,6 +6575,7 @@ export class RunnerEngine {
     }
     gameAudio.setPlaying(false);
     gameAudio.playCrash();
+    gameAudio.playCrashVoice(deathType);
 
     this.deathReason =
       deathType === 'chaser'
@@ -6798,6 +6828,7 @@ export class RunnerEngine {
       'webglcontextlost',
       this.handleContextLost,
     );
+    gameAudio.stopGameVoice();
     gameAudio.setPlaying(false);
 
     this.obstaclePool.forEach((bucket) => {

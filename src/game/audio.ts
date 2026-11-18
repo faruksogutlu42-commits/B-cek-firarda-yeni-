@@ -1,8 +1,63 @@
-import { SkinId, ZoneConfig } from './types';
+import { PowerupType, SkinId, ZoneConfig, ZoneId } from './types';
 
-const MENU_VOICE_URLS: Partial<Record<SkinId, string>> = {
+const MENU_VOICE_URLS: Record<SkinId, string> = {
+  kivircik_riza: '/audio/menu/kivircik_riza.wav',
+  tamirci_kazim: '/audio/menu/tamirci_kazim.wav',
+  diva_bocek: '/audio/menu/diva_bocek.wav',
   duktur_bocek: '/assets/aistudio/Acilci_Duktur_ana_sayfa_776dfd35.mp3',
+  hahamcan: '/audio/menu/hahamcan.wav',
 };
+
+const ZONE_VOICE_URLS: Record<ZoneId, string> = {
+  mahalle_caddesi: '/audio/zones/mahalle_caddesi.wav',
+  yeralti_magarasi: '/audio/zones/yeralti_magarasi.wav',
+  buzul_dunyasi: '/audio/zones/buzul_dunyasi.wav',
+  ates_diyari: '/audio/zones/ates_diyari.wav',
+  dev_mutfak: '/audio/zones/dev_mutfak.wav',
+  kopuklu_banyo: '/audio/zones/kopuklu_banyo.wav',
+  cilgin_lab: '/audio/zones/cilgin_lab.wav',
+  peynir_galaksisi: '/audio/zones/peynir_galaksisi.wav',
+};
+
+type GameEventVoiceKey =
+  | 'start'
+  | 'revive'
+  | 'jetpack'
+  | 'turbo'
+  | 'magnet'
+  | 'shield_break'
+  | 'spring'
+  | 'near_miss'
+  | 'stumble'
+  | 'chaser_catch'
+  | 'obstacle_crash';
+
+const EVENT_VOICE_URLS: Record<GameEventVoiceKey, string[]> = {
+  start: ['/audio/events/start.wav'],
+  revive: ['/audio/events/revive.wav'],
+  jetpack: ['/audio/events/jetpack_1.wav', '/audio/events/jetpack_2.wav'],
+  turbo: ['/audio/events/turbo.wav'],
+  magnet: ['/audio/events/magnet.wav'],
+  shield_break: ['/audio/events/shield_break.wav'],
+  spring: ['/audio/events/spring.wav'],
+  near_miss: ['/audio/events/near_miss_1.wav', '/audio/events/near_miss_2.wav'],
+  stumble: ['/audio/events/stumble_1.wav', '/audio/events/stumble_2.wav'],
+  chaser_catch: ['/audio/events/chaser_catch.wav'],
+  obstacle_crash: ['/audio/events/obstacle_crash.mp3'],
+};
+
+const ALL_VOICE_URLS: string[] = Array.from(
+  new Set([
+    ...Object.values(MENU_VOICE_URLS),
+    ...Object.values(ZONE_VOICE_URLS),
+    ...Object.values(EVENT_VOICE_URLS).flat(),
+  ]),
+);
+
+const VOICE_PRIORITY_FLAVOR = 40;
+const VOICE_PRIORITY_EVENT = 65;
+const VOICE_PRIORITY_ZONE = 80;
+const VOICE_PRIORITY_CRITICAL = 100;
 
 class GameAudioEngine {
   private ctx: AudioContext | null = null;
@@ -20,71 +75,94 @@ class GameAudioEngine {
   private coinCombo = 0;
   private lastCoinTime = 0;
   private isPlaying = false;
-  private menuVoiceElements = new Map<SkinId, HTMLAudioElement>();
-  private menuVoiceRawBytes = new Map<SkinId, ArrayBuffer>();
-  private menuVoiceFetchPromises = new Map<SkinId, Promise<ArrayBuffer | null>>();
-  private menuVoiceBuffers = new Map<SkinId, AudioBuffer>();
-  private menuVoiceDecoding = new Set<SkinId>();
+
+  private voiceElements = new Map<string, HTMLAudioElement>();
+  private voiceRawBytes = new Map<string, ArrayBuffer>();
+  private voiceFetchPromises = new Map<string, Promise<ArrayBuffer | null>>();
+  private voiceBuffers = new Map<string, AudioBuffer>();
+  private voiceDecodePromises = new Map<string, Promise<AudioBuffer | null>>();
+
   private activeMenuAudioEl: HTMLAudioElement | null = null;
   private activeMenuBufferSrc: AudioBufferSourceNode | null = null;
   private menuVoiceGain: GainNode | null = null;
   private menuVoicePlayToken = 0;
 
+  private activeGameAudioEl: HTMLAudioElement | null = null;
+  private activeGameBufferSrc: AudioBufferSourceNode | null = null;
+  private gameVoiceGain: GainNode | null = null;
+  private gameVoicePlayToken = 0;
+  private activeGameVoicePriority = 0;
+  private activeGameVoiceStartMs = 0;
+  private activeGameVoiceEndMs = 0;
+  private startSequenceToken = 0;
+  private startMahalleTimerId: number | null = null;
+  private lastVariantIndex = new Map<string, number>();
+  private lastEventVoiceMs = new Map<string, number>();
+
   constructor() {
-    this.preloadMenuVoices();
+    this.preloadVoices();
   }
 
-  private preloadMenuVoices(): void {
+  private preloadVoiceUrl(url: string): void {
     if (typeof window === 'undefined') return;
-    (Object.entries(MENU_VOICE_URLS) as [SkinId, string][]).forEach(([skinId, url]) => {
-      if (!this.menuVoiceElements.has(skinId)) {
-        const el = new Audio(url);
-        el.preload = 'auto';
-        el.load();
-        this.menuVoiceElements.set(skinId, el);
-      }
-      if (!this.menuVoiceFetchPromises.has(skinId) && typeof fetch === 'function') {
-        const p = fetch(url)
-          .then((res) => (res.ok ? res.arrayBuffer() : null))
-          .then((buf) => {
-            if (!buf) return null;
-            this.menuVoiceRawBytes.set(skinId, buf);
-            this.decodeMenuVoice(skinId);
-            return buf;
-          })
-          .catch(() => null);
-        this.menuVoiceFetchPromises.set(skinId, p);
-      }
-    });
+    if (!this.voiceElements.has(url)) {
+      const el = new Audio(url);
+      el.preload = 'auto';
+      el.load();
+      this.voiceElements.set(url, el);
+    }
+    if (!this.voiceFetchPromises.has(url) && typeof fetch === 'function') {
+      const p = fetch(url)
+        .then((res) => (res.ok ? res.arrayBuffer() : null))
+        .then((buf) => {
+          if (!buf) return null;
+          this.voiceRawBytes.set(url, buf);
+          void this.decodeVoiceUrl(url);
+          return buf;
+        })
+        .catch(() => null);
+      this.voiceFetchPromises.set(url, p);
+    }
   }
 
-  private async decodeMenuVoice(skinId: SkinId): Promise<AudioBuffer | null> {
-    const existing = this.menuVoiceBuffers.get(skinId);
-    if (existing) return existing;
-    if (!this.ctx || this.menuVoiceDecoding.has(skinId)) {
-      return null;
-    }
-    let raw = this.menuVoiceRawBytes.get(skinId) ?? null;
-    if (!raw) {
-      const pending = this.menuVoiceFetchPromises.get(skinId);
-      if (pending) {
-        raw = await pending;
-      }
-    }
-    if (!raw || !this.ctx) return null;
-    const afterWait = this.menuVoiceBuffers.get(skinId);
-    if (afterWait) return afterWait;
+  private preloadVoices(): void {
+    if (typeof window === 'undefined') return;
+    ALL_VOICE_URLS.forEach((url) => this.preloadVoiceUrl(url));
+  }
 
-    this.menuVoiceDecoding.add(skinId);
-    try {
-      const decoded = await this.ctx.decodeAudioData(raw.slice(0));
-      this.menuVoiceBuffers.set(skinId, decoded);
-      return decoded;
-    } catch {
-      return null;
-    } finally {
-      this.menuVoiceDecoding.delete(skinId);
+  private async decodeVoiceUrl(url: string): Promise<AudioBuffer | null> {
+    const existing = this.voiceBuffers.get(url);
+    if (existing) return existing;
+    if (!this.ctx) return null;
+    const inflight = this.voiceDecodePromises.get(url);
+    if (inflight) {
+      return inflight;
     }
+
+    const promise = (async (): Promise<AudioBuffer | null> => {
+      let raw = this.voiceRawBytes.get(url) ?? null;
+      if (!raw) {
+        const pending = this.voiceFetchPromises.get(url);
+        if (pending) {
+          raw = await pending;
+        }
+      }
+      if (!raw || !this.ctx) return null;
+      const afterWait = this.voiceBuffers.get(url);
+      if (afterWait) return afterWait;
+      try {
+        const decoded = await this.ctx.decodeAudioData(raw.slice(0));
+        this.voiceBuffers.set(url, decoded);
+        return decoded;
+      } catch {
+        return null;
+      } finally {
+        this.voiceDecodePromises.delete(url);
+      }
+    })();
+
+    this.voiceDecodePromises.set(url, promise);
+    return promise;
   }
 
   public configure(opts: {
@@ -97,6 +175,7 @@ class GameAudioEngine {
     this.ambienceEnabled = opts.ambienceEnabled;
     if (typeof opts.sfxVolume === 'number') this.sfxVolume = opts.sfxVolume;
     if (typeof opts.ambienceVolume === 'number') this.ambienceVolume = opts.ambienceVolume;
+    const targetVoiceVol = this.sfxEnabled ? this.sfxVolume : 0;
     if (this.masterGain && this.ctx) {
       this.masterGain.gain.setTargetAtTime(
         this.sfxEnabled ? 0.75 * this.sfxVolume : 0,
@@ -106,13 +185,23 @@ class GameAudioEngine {
     }
     if (this.menuVoiceGain && this.ctx) {
       this.menuVoiceGain.gain.setTargetAtTime(
-        this.sfxEnabled ? this.sfxVolume : 0,
+        targetVoiceVol,
         this.ctx.currentTime,
         0.05,
       );
     }
     if (this.activeMenuAudioEl) {
-      this.activeMenuAudioEl.volume = this.sfxEnabled ? this.sfxVolume : 0;
+      this.activeMenuAudioEl.volume = targetVoiceVol;
+    }
+    if (this.gameVoiceGain && this.ctx) {
+      this.gameVoiceGain.gain.setTargetAtTime(
+        targetVoiceVol,
+        this.ctx.currentTime,
+        0.05,
+      );
+    }
+    if (this.activeGameAudioEl) {
+      this.activeGameAudioEl.volume = targetVoiceVol;
     }
     this.updateAmbienceGain();
   }
@@ -121,7 +210,7 @@ class GameAudioEngine {
     return Boolean(MENU_VOICE_URLS[skinId]);
   }
 
-  private playBufferVoice(buffer: AudioBuffer, targetVol: number, token: number): boolean {
+  private playMenuBufferVoice(buffer: AudioBuffer, targetVol: number, token: number): boolean {
     if (!this.ctx || token !== this.menuVoicePlayToken) return false;
     if (!this.menuVoiceGain) {
       this.menuVoiceGain = this.ctx.createGain();
@@ -157,14 +246,15 @@ class GameAudioEngine {
       this.unlock();
     }
 
+    this.stopGameVoice();
     this.stopMenuVoice();
     const token = ++this.menuVoicePlayToken;
     const targetVol = this.sfxEnabled ? this.sfxVolume : 0;
 
     if (this.ctx && this.ctx.state === 'running') {
-      const buffer = this.menuVoiceBuffers.get(skinId) ?? (await this.decodeMenuVoice(skinId));
+      const buffer = this.voiceBuffers.get(url) ?? (await this.decodeVoiceUrl(url));
       if (token !== this.menuVoicePlayToken) return 'unavailable';
-      if (buffer && this.playBufferVoice(buffer, targetVol, token)) {
+      if (buffer && this.playMenuBufferVoice(buffer, targetVol, token)) {
         return 'played';
       }
     }
@@ -172,14 +262,14 @@ class GameAudioEngine {
     if (token !== this.menuVoicePlayToken) return 'unavailable';
 
     if (!opts?.auto) {
-      void this.decodeMenuVoice(skinId);
+      void this.decodeVoiceUrl(url);
     }
 
-    let audio = this.menuVoiceElements.get(skinId);
+    let audio = this.voiceElements.get(url);
     if (!audio) {
       audio = new Audio(url);
       audio.preload = 'auto';
-      this.menuVoiceElements.set(skinId, audio);
+      this.voiceElements.set(url, audio);
     }
     audio.volume = targetVol;
     if (audio.readyState > 0) {
@@ -232,6 +322,254 @@ class GameAudioEngine {
     }
   }
 
+  private clearStartSequence(): void {
+    this.startSequenceToken += 1;
+    if (this.startMahalleTimerId !== null) {
+      window.clearTimeout(this.startMahalleTimerId);
+      this.startMahalleTimerId = null;
+    }
+  }
+
+  private stopActiveGameVoicePlayback(): void {
+    this.gameVoicePlayToken += 1;
+    this.activeGameVoicePriority = 0;
+    this.activeGameVoiceStartMs = 0;
+    this.activeGameVoiceEndMs = 0;
+    if (this.activeGameBufferSrc) {
+      try {
+        this.activeGameBufferSrc.stop();
+      } catch {
+        // ignore
+      }
+      this.activeGameBufferSrc = null;
+    }
+    if (this.activeGameAudioEl) {
+      this.activeGameAudioEl.onended = null;
+      try {
+        this.activeGameAudioEl.pause();
+        if (this.activeGameAudioEl.readyState > 0) {
+          this.activeGameAudioEl.currentTime = 0;
+        }
+      } catch {
+        // ignore
+      }
+      this.activeGameAudioEl = null;
+    }
+  }
+
+  public stopGameVoice(): void {
+    this.clearStartSequence();
+    this.stopActiveGameVoicePlayback();
+  }
+
+  private pickVariantUrl(key: GameEventVoiceKey): string {
+    const list = EVENT_VOICE_URLS[key];
+    if (list.length <= 1) return list[0];
+    const lastIdx = this.lastVariantIndex.get(key) ?? -1;
+    let idx = Math.floor(Math.random() * list.length);
+    if (idx === lastIdx) {
+      idx = (idx + 1) % list.length;
+    }
+    this.lastVariantIndex.set(key, idx);
+    return list[idx];
+  }
+
+  private async playGameVoiceUrl(
+    url: string,
+    priority: number,
+    onComplete?: () => void,
+  ): Promise<void> {
+    if (typeof window === 'undefined') return;
+    if (!this.sfxEnabled || this.sfxVolume <= 0.01) return;
+
+    const now = performance.now();
+    const isOngoing =
+      (this.activeGameBufferSrc !== null || this.activeGameAudioEl !== null) &&
+      now < this.activeGameVoiceEndMs;
+
+    if (isOngoing) {
+      if (priority < this.activeGameVoicePriority) {
+        // Lower-priority voice yields to ongoing higher-priority line
+        return;
+      }
+      if (
+        priority === VOICE_PRIORITY_EVENT &&
+        this.activeGameVoicePriority === VOICE_PRIORITY_ZONE &&
+        now - this.activeGameVoiceStartMs < 1800
+      ) {
+        // Protect the opening words of a zone announcement from immediate cut-off
+        return;
+      }
+    }
+
+    this.stopActiveGameVoicePlayback();
+    const token = ++this.gameVoicePlayToken;
+    const targetVol = this.sfxVolume;
+    this.activeGameVoicePriority = priority;
+    this.activeGameVoiceStartMs = now;
+    this.activeGameVoiceEndMs = now + 7000;
+
+    if (this.ctx && this.ctx.state === 'running') {
+      const buffer = this.voiceBuffers.get(url) ?? (await this.decodeVoiceUrl(url));
+      if (token !== this.gameVoicePlayToken) return;
+      if (buffer) {
+        if (!this.gameVoiceGain) {
+          this.gameVoiceGain = this.ctx.createGain();
+          this.gameVoiceGain.connect(this.ctx.destination);
+        }
+        this.gameVoiceGain.gain.setValueAtTime(targetVol, this.ctx.currentTime);
+        const src = this.ctx.createBufferSource();
+        src.buffer = buffer;
+        src.connect(this.gameVoiceGain);
+        this.activeGameVoiceStartMs = performance.now();
+        this.activeGameVoiceEndMs =
+          this.activeGameVoiceStartMs + buffer.duration * 1000;
+        src.onended = () => {
+          if (this.activeGameBufferSrc === src) {
+            this.activeGameBufferSrc = null;
+            this.activeGameVoicePriority = 0;
+            this.activeGameVoiceEndMs = 0;
+          }
+          if (token === this.gameVoicePlayToken) {
+            onComplete?.();
+          }
+        };
+        this.activeGameBufferSrc = src;
+        src.start(0);
+        return;
+      }
+    }
+
+    if (token !== this.gameVoicePlayToken) return;
+    void this.decodeVoiceUrl(url);
+
+    let audio = this.voiceElements.get(url);
+    if (!audio) {
+      audio = new Audio(url);
+      audio.preload = 'auto';
+      this.voiceElements.set(url, audio);
+    }
+    audio.volume = targetVol;
+    if (audio.readyState > 0) {
+      try {
+        audio.currentTime = 0;
+      } catch {
+        // ignore
+      }
+    }
+    this.activeGameAudioEl = audio;
+    const estDurMs =
+      Number.isFinite(audio.duration) && audio.duration > 0
+        ? audio.duration * 1000
+        : 6000;
+    this.activeGameVoiceStartMs = performance.now();
+    this.activeGameVoiceEndMs = this.activeGameVoiceStartMs + estDurMs;
+    audio.onended = () => {
+      if (this.activeGameAudioEl === audio) {
+        this.activeGameAudioEl = null;
+        this.activeGameVoicePriority = 0;
+        this.activeGameVoiceEndMs = 0;
+      }
+      if (token === this.gameVoicePlayToken) {
+        onComplete?.();
+      }
+    };
+    try {
+      await audio.play();
+    } catch {
+      if (this.activeGameAudioEl === audio) {
+        this.activeGameAudioEl = null;
+        this.activeGameVoicePriority = 0;
+        this.activeGameVoiceEndMs = 0;
+      }
+    }
+  }
+
+  public playRunStart(canAnnounceMahalle: () => boolean): void {
+    this.stopGameVoice();
+    if (!this.sfxEnabled || this.sfxVolume <= 0.01) return;
+    const seqToken = ++this.startSequenceToken;
+    const startUrl = this.pickVariantUrl('start');
+    void this.playGameVoiceUrl(startUrl, VOICE_PRIORITY_ZONE, () => {
+      if (seqToken !== this.startSequenceToken) return;
+      this.startMahalleTimerId = window.setTimeout(() => {
+        this.startMahalleTimerId = null;
+        if (seqToken !== this.startSequenceToken) return;
+        if (!this.isPlaying || !canAnnounceMahalle()) return;
+        const now = performance.now();
+        const isBusy =
+          (this.activeGameBufferSrc !== null || this.activeGameAudioEl !== null) &&
+          now < this.activeGameVoiceEndMs;
+        if (isBusy) return;
+        this.playZoneAnnouncement('mahalle_caddesi');
+      }, 480);
+    });
+  }
+
+  public playZoneAnnouncement(zoneId: ZoneId): void {
+    this.clearStartSequence();
+    const url = ZONE_VOICE_URLS[zoneId];
+    if (!url) return;
+    void this.playGameVoiceUrl(url, VOICE_PRIORITY_ZONE);
+  }
+
+  public playPowerupVoice(type: PowerupType): void {
+    const key: GameEventVoiceKey | null =
+      type === 'wings'
+        ? 'jetpack'
+        : type === 'turbo'
+          ? 'turbo'
+          : type === 'magnet'
+            ? 'magnet'
+            : null;
+    if (!key) return;
+    this.clearStartSequence();
+    void this.playGameVoiceUrl(this.pickVariantUrl(key), VOICE_PRIORITY_EVENT);
+  }
+
+  public playShieldBreakVoice(): void {
+    this.clearStartSequence();
+    void this.playGameVoiceUrl(
+      this.pickVariantUrl('shield_break'),
+      VOICE_PRIORITY_EVENT,
+    );
+  }
+
+  public playSpringVoice(): void {
+    this.clearStartSequence();
+    const now = performance.now();
+    const last = this.lastEventVoiceMs.get('spring') ?? 0;
+    if (now - last < 2800) return;
+    this.lastEventVoiceMs.set('spring', now);
+    void this.playGameVoiceUrl(this.pickVariantUrl('spring'), VOICE_PRIORITY_EVENT);
+  }
+
+  public playNearMissVoice(): void {
+    const now = performance.now();
+    const last = this.lastEventVoiceMs.get('near_miss') ?? 0;
+    if (now - last < 6500) return;
+    const url = this.pickVariantUrl('near_miss');
+    this.lastEventVoiceMs.set('near_miss', now);
+    void this.playGameVoiceUrl(url, VOICE_PRIORITY_FLAVOR);
+  }
+
+  public playStumbleVoice(): void {
+    this.clearStartSequence();
+    void this.playGameVoiceUrl(this.pickVariantUrl('stumble'), VOICE_PRIORITY_EVENT);
+  }
+
+  public playCrashVoice(deathType: 'obstacle' | 'chaser'): void {
+    this.clearStartSequence();
+    const key: GameEventVoiceKey =
+      deathType === 'chaser' ? 'chaser_catch' : 'obstacle_crash';
+    void this.playGameVoiceUrl(this.pickVariantUrl(key), VOICE_PRIORITY_CRITICAL);
+  }
+
+  public playReviveVoice(): void {
+    this.clearStartSequence();
+    void this.playGameVoiceUrl(this.pickVariantUrl('revive'), VOICE_PRIORITY_CRITICAL);
+  }
+
   public unlock(): void {
     if (typeof window === 'undefined') return;
     if (!this.ctx) {
@@ -246,8 +584,8 @@ class GameAudioEngine {
       this.masterGain.connect(this.ctx.destination);
 
       this.setupAmbienceNodes();
-      (Object.keys(MENU_VOICE_URLS) as SkinId[]).forEach((skinId) => {
-        this.decodeMenuVoice(skinId);
+      ALL_VOICE_URLS.forEach((url) => {
+        void this.decodeVoiceUrl(url);
       });
     }
     if (this.ctx.state === 'suspended') {
@@ -844,10 +1182,11 @@ class GameAudioEngine {
 
   public dispose(): void {
     this.stopMenuVoice();
-    this.menuVoiceElements.clear();
-    this.menuVoiceRawBytes.clear();
-    this.menuVoiceFetchPromises.clear();
-    this.menuVoiceBuffers.clear();
+    this.stopGameVoice();
+    this.voiceElements.clear();
+    this.voiceRawBytes.clear();
+    this.voiceFetchPromises.clear();
+    this.voiceBuffers.clear();
     if (this.ambienceTimer !== null) {
       window.clearInterval(this.ambienceTimer);
       this.ambienceTimer = null;
